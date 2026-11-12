@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir poetry==1.8.3
 WORKDIR /app
 
 COPY pyproject.toml poetry.lock ./
-RUN poetry install --no-root --only main
+RUN poetry install --no-root --with dev
 
 COPY . .
 
