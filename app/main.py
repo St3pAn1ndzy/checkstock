@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 
 from app.database import Base, engine
 from app.exceptions import AppError
+from app.routers import operations, products, stock, warehouses
 from app.schemas import ErrorResponse
 
 
@@ -16,6 +17,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="CheckStock", version="0.1.0", lifespan=lifespan)
+
+app.include_router(warehouses.router)
+app.include_router(products.router)
+app.include_router(stock.router)
+app.include_router(operations.router)
 
 
 @app.exception_handler(AppError)
