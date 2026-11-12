@@ -24,6 +24,9 @@ ruff = "^0.17.4"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
+[tool.ruff.lint]
+ignore = ["B008"]
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
