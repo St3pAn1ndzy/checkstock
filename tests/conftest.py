@@ -7,9 +7,11 @@ race condition asyncpg при смене event loop.
 """
 
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
 from app.database import Base, async_session_factory, engine
+from app.main import app
 from app.models import Product, Stock, Warehouse
 
 
@@ -76,3 +78,11 @@ async def session(db):
     """Прокси: только сессия из db."""
     sess, _ = db
     return sess
+
+
+@pytest_asyncio.fixture(scope="function")
+async def client(clean_db):
+    """HTTP-клиент поверх ASGI-приложения. Использует чистую БД."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
