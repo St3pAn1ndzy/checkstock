@@ -6,13 +6,14 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.enums import MovementStatus, MovementType
 from app.exceptions import (
     ConflictError,
+    IdempotencyConflictError,
     InsufficientStockError,
     InvalidStatusError,
     NotFoundError,
@@ -22,12 +23,17 @@ from app.schemas import (
     IncomeRequest,
     InTransitItem,
     MovementResponse,
+    MovementsListResponse,
+    ProductCreate,
+    ProductRead,
     ReserveFbsRequest,
     ShipFboRequest,
     StockItem,
     StockReportResponse,
     TransferRequest,
+    WarehouseCreate,
     WarehouseRead,
+    WarehouseUpdate,
 )
 
 # ── Helpers (приватные) ───────────────────────────────────────────
@@ -84,6 +90,57 @@ async def _find_by_idempotency_key(
     return await session.scalar(stmt)
 
 
+async def _find_or_conflict(
+    session: AsyncSession,
+    idempotency_key: str,
+    expected_type: MovementType,
+    expected_product_id: int,
+    expected_quantity: int,
+    expected_from_warehouse_id: int | None = None,
+    expected_to_warehouse_id: int | None = None,
+) -> Movement | None:
+    """
+    Найти Movement по idempotency_key.
+    Если найден — проверить, что type и параметры совпадают с ожидаемыми.
+    Если не совпадают — IdempotencyConflictError (409).
+    Если не найден — None.
+    """
+    existing = await _find_by_idempotency_key(session, idempotency_key)
+    if existing is None:
+        return None
+
+    mismatches = []
+    if existing.type != expected_type:
+        mismatches.append(
+            f"type (ожидалось {expected_type.value}, получено {existing.type.value})"
+        )
+    if existing.product_id != expected_product_id:
+        mismatches.append(
+            f"product_id (ожидалось {expected_product_id}, получено {existing.product_id})"
+        )
+    if existing.quantity != expected_quantity:
+        mismatches.append(
+            f"quantity (ожидалось {expected_quantity}, получено {existing.quantity})"
+        )
+    if (
+        expected_from_warehouse_id is not None
+        and existing.from_warehouse_id != expected_from_warehouse_id
+    ):
+        mismatches.append("from_warehouse_id")
+    if (
+        expected_to_warehouse_id is not None
+        and existing.to_warehouse_id != expected_to_warehouse_id
+    ):
+        mismatches.append("to_warehouse_id")
+
+    if mismatches:
+        raise IdempotencyConflictError(
+            f"idempotency_key '{idempotency_key}' уже использован с другими параметрами: "
+            f"{', '.join(mismatches)}"
+        )
+    return existing
+
+
 def _to_movement_response(mv: Movement) -> MovementResponse:
     """Сконвертировать ORM-модель в Response-схему."""
     return MovementResponse.model_validate(mv)
@@ -97,7 +154,14 @@ async def income(session: AsyncSession, req: IncomeRequest) -> MovementResponse:
     Приход товара на склад. Идемпотентен по idempotency_key.
     Увеличивает quantity, пишет Movement(INCOME, COMPLETED).
     """
-    existing = await _find_by_idempotency_key(session, req.idempotency_key)
+    existing = await _find_or_conflict(
+        session,
+        idempotency_key=req.idempotency_key,
+        expected_type=MovementType.INCOME,
+        expected_product_id=req.product_id,
+        expected_quantity=req.quantity,
+        expected_to_warehouse_id=req.warehouse_id,
+    )
     if existing is not None:
         return _to_movement_response(existing)
 
@@ -130,7 +194,14 @@ async def reserve_fbs(
     Резерв под FBS. Проверяет available >= quantity, иначе InsufficientStockError (409).
     Увеличивает reserved_fbs, пишет Movement(FBS_RESERVE, PENDING).
     """
-    existing = await _find_by_idempotency_key(session, req.idempotency_key)
+    existing = await _find_or_conflict(
+        session,
+        idempotency_key=req.idempotency_key,
+        expected_type=MovementType.FBS_RESERVE,
+        expected_product_id=req.product_id,
+        expected_quantity=req.quantity,
+        expected_from_warehouse_id=req.warehouse_id,
+    )
     if existing is not None:
         return _to_movement_response(existing)
 
@@ -247,7 +318,14 @@ async def ship_fbo(session: AsyncSession, req: ShipFboRequest) -> MovementRespon
     создаёт Movement(FBO_SHIP, PENDING). Приёмка маркетплейсом — через receive().
     Идемпотентен по idempotency_key.
     """
-    existing = await _find_by_idempotency_key(session, req.idempotency_key)
+    existing = await _find_or_conflict(
+        session,
+        idempotency_key=req.idempotency_key,
+        expected_type=MovementType.FBO_SHIP,
+        expected_product_id=req.product_id,
+        expected_quantity=req.quantity,
+        expected_from_warehouse_id=req.warehouse_id,
+    )
     if existing is not None:
         return _to_movement_response(existing)
 
@@ -294,6 +372,18 @@ async def delete_warehouse(session: AsyncSession, warehouse_id: int) -> Warehous
 
     if wh.is_deleted:
         return WarehouseRead.model_validate(wh)
+
+    # Проверить, что на складе нет активных FBS-резервов
+    reserved_total = await session.scalar(
+        select(func.coalesce(func.sum(Stock.reserved_fbs), 0)).where(
+            Stock.warehouse_id == warehouse_id
+        )
+    )
+    if reserved_total > 0:
+        raise ConflictError(
+            f"Нельзя удалить склад: на нём {reserved_total} ед. в резерве FBS. "
+            f"Отмените резервы (cancel_fbs) или отправьте их (ship_fbs)."
+        )
 
     wh.is_deleted = True
     await session.commit()
@@ -381,7 +471,15 @@ async def transfer(session: AsyncSession, req: TransferRequest) -> MovementRespo
     На to_wh НЕ зачисляет — только при receive().
     Блокирует обе строки stocks в порядке возрастания warehouse_id (защита от deadlock).
     """
-    existing = await _find_by_idempotency_key(session, req.idempotency_key)
+    existing = await _find_or_conflict(
+        session,
+        idempotency_key=req.idempotency_key,
+        expected_type=MovementType.TRANSFER,
+        expected_product_id=req.product_id,
+        expected_quantity=req.quantity,
+        expected_from_warehouse_id=req.from_warehouse_id,
+        expected_to_warehouse_id=req.to_warehouse_id,
+    )
     if existing is not None:
         return _to_movement_response(existing)
 
@@ -466,3 +564,95 @@ async def receive(session: AsyncSession, movement_id: int) -> MovementResponse:
     await session.commit()
     await session.refresh(mv)
     return _to_movement_response(mv)
+
+
+# ── CRUD-функции для роутеров ────────────────────────────────────────
+
+
+async def create_warehouse(
+    session: AsyncSession, req: WarehouseCreate
+) -> WarehouseRead:
+    """Создать новый склад. Проверяет уникальность имени."""
+    stmt = select(Warehouse).where(Warehouse.name == req.name)
+    existing = await session.scalar(stmt)
+    if existing is not None:
+        raise ConflictError(f"Склад «{req.name}» уже существует")
+
+    wh = Warehouse(name=req.name)
+    session.add(wh)
+    await session.commit()
+    await session.refresh(wh)
+    return WarehouseRead.model_validate(wh)
+
+
+async def list_warehouses(session: AsyncSession) -> list[WarehouseRead]:
+    """Вернуть все активные склады (is_deleted=False)."""
+    stmt = select(Warehouse).where(Warehouse.is_deleted == False).order_by(Warehouse.id)
+    result = await session.execute(stmt)
+    return [WarehouseRead.model_validate(w) for w in result.scalars()]
+
+
+async def update_warehouse(
+    session: AsyncSession, warehouse_id: int, req: WarehouseUpdate
+) -> WarehouseRead:
+    """Переименовать склад. Проверяет уникальность нового имени."""
+    wh = await session.get(Warehouse, warehouse_id)
+    if wh is None or wh.is_deleted:
+        raise NotFoundError(f"Склад с id={warehouse_id} не найден")
+
+    stmt = select(Warehouse).where(
+        Warehouse.name == req.name, Warehouse.id != warehouse_id
+    )
+    existing = await session.scalar(stmt)
+    if existing is not None:
+        raise ConflictError(f"Склад «{req.name}» уже существует")
+
+    wh.name = req.name
+    await session.commit()
+    await session.refresh(wh)
+    return WarehouseRead.model_validate(wh)
+
+
+async def create_product(session: AsyncSession, req: ProductCreate) -> ProductRead:
+    """Создать новый товар. Проверяет уникальность SKU."""
+    stmt = select(Product).where(Product.sku == req.sku)
+    existing = await session.scalar(stmt)
+    if existing is not None:
+        raise ConflictError(f"Товар с SKU «{req.sku}» уже существует")
+
+    prod = Product(sku=req.sku, name=req.name)
+    session.add(prod)
+    await session.commit()
+    await session.refresh(prod)
+    return ProductRead.model_validate(prod)
+
+
+async def list_products(session: AsyncSession) -> list[ProductRead]:
+    """Вернуть все товары."""
+    stmt = select(Product).order_by(Product.id)
+    result = await session.execute(stmt)
+    return [ProductRead.model_validate(p) for p in result.scalars()]
+
+
+async def list_movements(
+    session: AsyncSession,
+    status: MovementStatus | None = None,
+    type_: MovementType | None = None,
+    product_id: int | None = None,
+) -> MovementsListResponse:
+    """Вернуть список движений с опциональными фильтрами."""
+    stmt = select(Movement)
+    if status is not None:
+        stmt = stmt.where(Movement.status == status)
+    if type_ is not None:
+        stmt = stmt.where(Movement.type == type_)
+    if product_id is not None:
+        stmt = stmt.where(Movement.product_id == product_id)
+    stmt = stmt.order_by(Movement.created_at.desc(), Movement.id.desc())
+
+    result = await session.execute(stmt)
+    movements = list(result.scalars())
+    return MovementsListResponse(
+        items=[MovementResponse.model_validate(m) for m in movements],
+        total=len(movements),
+    )
