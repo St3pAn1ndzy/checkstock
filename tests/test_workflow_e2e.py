@@ -261,15 +261,21 @@ class TestWorkflowE2E:
         all_stocks_qty = sum(
             row[0] for row in (await session.execute(select(Stock.quantity))).all()
         )
-        pending_qty = await session.scalar(
-            select(func.coalesce(func.sum(Movement.quantity), 0)).where(
-                Movement.status == MovementStatus.PENDING
+        pending_qty = (
+            await session.scalar(
+                select(func.coalesce(func.sum(Movement.quantity), 0)).where(
+                    Movement.status == MovementStatus.PENDING
+                )
             )
-        ) or 0
-        shipped_qty = await session.scalar(
-            select(func.coalesce(func.sum(Movement.quantity), 0)).where(
-                Movement.type.in_([MovementType.FBS_SHIP, MovementType.FBO_SHIP]),
-                Movement.status == MovementStatus.COMPLETED,
+            or 0
+        )
+        shipped_qty = (
+            await session.scalar(
+                select(func.coalesce(func.sum(Movement.quantity), 0)).where(
+                    Movement.type.in_([MovementType.FBS_SHIP, MovementType.FBO_SHIP]),
+                    Movement.status == MovementStatus.COMPLETED,
+                )
             )
-        ) or 0
+            or 0
+        )
         assert all_stocks_qty + pending_qty + shipped_qty == 30
