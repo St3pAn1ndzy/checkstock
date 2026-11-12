@@ -5,6 +5,7 @@ from app.config import settings
 
 engine = create_async_engine(settings.database_url, echo=False)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+async_session_factory = SessionLocal  # алиас для seed.py
 
 
 class Base(DeclarativeBase):
