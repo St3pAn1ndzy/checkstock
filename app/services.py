@@ -17,7 +17,13 @@ from app.exceptions import (
     NotFoundError,
 )
 from app.models import Movement, Product, Stock, Warehouse
-from app.schemas import IncomeRequest, MovementResponse, ReserveFbsRequest
+from app.schemas import (
+    IncomeRequest,
+    MovementResponse,
+    ReserveFbsRequest,
+    TransferRequest,
+)
+
 
 # ── Helpers (приватные) ───────────────────────────────────────────
 
@@ -223,6 +229,97 @@ async def cancel_fbs(session: AsyncSession, movement_id: int) -> MovementRespons
 
     stock.reserved_fbs -= mv.quantity
     mv.status = MovementStatus.CANCELLED
+    mv.completed_at = datetime.now(UTC)
+
+    await session.commit()
+    await session.refresh(mv)
+    return _to_movement_response(mv)
+
+
+async def transfer(session: AsyncSession, req: TransferRequest) -> MovementResponse:
+    """
+    Перемещение между ФФ. Списывает с from_wh, создаёт Movement(TRANSFER, PENDING).
+    На to_wh НЕ зачисляет — только при receive().
+    Блокирует обе строки stocks в порядке возрастания warehouse_id (защита от deadlock).
+    """
+    existing = await _find_by_idempotency_key(session, req.idempotency_key)
+    if existing is not None:
+        return _to_movement_response(existing)
+
+    from_wh = await _get_warehouse_or_404(session, req.from_warehouse_id)
+    await _get_warehouse_or_404(session, req.to_warehouse_id)
+    await _get_product_or_404(session, req.product_id)
+
+    # Блокировка в порядке возрастания warehouse_id предотвращает deadlock
+    # между transfer(A→B) и transfer(B→A).
+    lo_id = min(req.from_warehouse_id, req.to_warehouse_id)
+    hi_id = max(req.from_warehouse_id, req.to_warehouse_id)
+    lo_stock = await _get_or_create_stock(session, lo_id, req.product_id)
+    hi_stock = await _get_or_create_stock(session, hi_id, req.product_id)
+
+    if req.from_warehouse_id == lo_id:
+        from_stock, to_stock = lo_stock, hi_stock
+    else:
+        from_stock, to_stock = hi_stock, lo_stock
+
+    available = from_stock.quantity - from_stock.reserved_fbs
+    if available < req.quantity:
+        wh_name = from_wh.name
+        await session.rollback()
+        raise InsufficientStockError(
+            warehouse_name=wh_name,
+            available=available,
+            requested=req.quantity,
+        )
+
+    from_stock.quantity -= req.quantity
+    # to_stock НЕ трогаем — товар в пути
+
+    mv = Movement(
+        type=MovementType.TRANSFER,
+        status=MovementStatus.PENDING,
+        product_id=req.product_id,
+        quantity=req.quantity,
+        from_warehouse_id=req.from_warehouse_id,
+        to_warehouse_id=req.to_warehouse_id,
+        idempotency_key=req.idempotency_key,
+    )
+    session.add(mv)
+    await session.commit()
+    await session.refresh(mv)
+    return _to_movement_response(mv)
+
+
+async def receive(session: AsyncSession, movement_id: int) -> MovementResponse:
+    """
+    Приёмка товара. Для TRANSFER — зачисляет на to_warehouse.
+    Для FBO_SHIP — просто помечает COMPLETED (товар у маркетплейса, stocks не трогаем).
+    Идемпотентность по статусу: COMPLETED → вернуть, CANCELLED → 409.
+    """
+    mv = await session.get(Movement, movement_id)
+    if mv is None:
+        raise NotFoundError(f"Movement с id={movement_id} не найден")
+
+    if mv.status == MovementStatus.COMPLETED:
+        return _to_movement_response(mv)
+
+    if mv.type not in (MovementType.TRANSFER, MovementType.FBO_SHIP):
+        raise InvalidStatusError(
+            f"receive поддерживает TRANSFER и FBO_SHIP, получен {mv.type}"
+        )
+
+    if mv.status == MovementStatus.CANCELLED:
+        raise InvalidStatusError("Нельзя принять отменённое движение")
+
+    # mv.status == PENDING
+    if mv.type == MovementType.TRANSFER:
+        to_stock = await _get_or_create_stock(
+            session, mv.to_warehouse_id, mv.product_id
+        )
+        to_stock.quantity += mv.quantity
+    # FBO_SHIP: ничего не делаем со stocks — товар у маркетплейса
+
+    mv.status = MovementStatus.COMPLETED
     mv.completed_at = datetime.now(UTC)
 
     await session.commit()
