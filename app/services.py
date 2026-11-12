@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.enums import MovementStatus, MovementType
 from app.exceptions import (
@@ -19,9 +20,14 @@ from app.exceptions import (
 from app.models import Movement, Product, Stock, Warehouse
 from app.schemas import (
     IncomeRequest,
+    InTransitItem,
     MovementResponse,
     ReserveFbsRequest,
+    ShipFboRequest,
+    StockItem,
+    StockReportResponse,
     TransferRequest,
+    WarehouseRead,
 )
 
 
@@ -234,6 +240,140 @@ async def cancel_fbs(session: AsyncSession, movement_id: int) -> MovementRespons
     await session.commit()
     await session.refresh(mv)
     return _to_movement_response(mv)
+
+
+async def ship_fbo(session: AsyncSession, req: ShipFboRequest) -> MovementResponse:
+    """
+    Отправка на маркетплейс по FBO. Списывает товар с ФФ,
+    создаёт Movement(FBO_SHIP, PENDING). Приёмка маркетплейсом — через receive().
+    Идемпотентен по idempotency_key.
+    """
+    existing = await _find_by_idempotency_key(session, req.idempotency_key)
+    if existing is not None:
+        return _to_movement_response(existing)
+
+    wh = await _get_warehouse_or_404(session, req.warehouse_id)
+    await _get_product_or_404(session, req.product_id)
+
+    stock = await _get_or_create_stock(session, req.warehouse_id, req.product_id)
+    available = stock.quantity - stock.reserved_fbs
+    if available < req.quantity:
+        wh_name = wh.name
+        await session.rollback()
+        raise InsufficientStockError(
+            warehouse_name=wh_name,
+            available=available,
+            requested=req.quantity,
+        )
+
+    stock.quantity -= req.quantity
+    # reserved_fbs не трогаем — FBO не про резерв
+
+    mv = Movement(
+        type=MovementType.FBO_SHIP,
+        status=MovementStatus.PENDING,
+        product_id=req.product_id,
+        quantity=req.quantity,
+        from_warehouse_id=req.warehouse_id,
+        to_warehouse_id=None,
+        idempotency_key=req.idempotency_key,
+    )
+    session.add(mv)
+    await session.commit()
+    await session.refresh(mv)
+    return _to_movement_response(mv)
+
+
+async def delete_warehouse(session: AsyncSession, warehouse_id: int) -> WarehouseRead:
+    """
+    Soft delete склада. Остатки и история сохраняются, склад скрывается из списков.
+    Идемпотентно: повторное удаление не падает.
+    """
+    wh = await session.get(Warehouse, warehouse_id)
+    if wh is None:
+        raise NotFoundError(f"Склад с id={warehouse_id} не найден")
+
+    if wh.is_deleted:
+        return WarehouseRead.model_validate(wh)
+
+    wh.is_deleted = True
+    await session.commit()
+    await session.refresh(wh)
+    return WarehouseRead.model_validate(wh)
+
+
+async def get_stock_report(session: AsyncSession) -> StockReportResponse:
+    """
+    Отчёт остатков: список stocks с available + товар в пути (PENDING movements).
+    Склады с is_deleted=True не включаются.
+    """
+    # Items: stocks JOIN warehouses JOIN products WHERE warehouses.is_deleted=False
+    stmt_items = (
+        select(
+            Stock,
+            Warehouse.name.label("warehouse_name"),
+            Product.sku,
+            Product.name.label("product_name"),
+        )
+        .join(Warehouse, Stock.warehouse_id == Warehouse.id)
+        .join(Product, Stock.product_id == Product.id)
+        .where(Warehouse.is_deleted == False)
+        .order_by(Warehouse.name, Product.sku)
+    )
+    rows = (await session.execute(stmt_items)).all()
+
+    items = [
+        StockItem(
+            warehouse_id=stock.warehouse_id,
+            warehouse_name=warehouse_name,
+            product_id=stock.product_id,
+            sku=sku,
+            product_name=product_name,
+            quantity=stock.quantity,
+            reserved_fbs=stock.reserved_fbs,
+            available=stock.quantity - stock.reserved_fbs,
+        )
+        for stock, warehouse_name, sku, product_name in rows
+    ]
+
+    # In-transit: PENDING movements TRANSFER / FBO_SHIP
+    WarehouseFrom = aliased(Warehouse, name="from_wh")
+    WarehouseTo = aliased(Warehouse, name="to_wh")
+    stmt_transit = (
+        select(
+            Movement,
+            Product.sku,
+            Product.name.label("product_name"),
+            WarehouseFrom.name.label("from_warehouse_name"),
+            WarehouseTo.name.label("to_warehouse_name"),
+        )
+        .join(Product, Movement.product_id == Product.id)
+        .outerjoin(WarehouseFrom, Movement.from_warehouse_id == WarehouseFrom.id)
+        .outerjoin(WarehouseTo, Movement.to_warehouse_id == WarehouseTo.id)
+        .where(
+            Movement.status == MovementStatus.PENDING,
+            Movement.type.in_([MovementType.TRANSFER, MovementType.FBO_SHIP]),
+        )
+        .order_by(Movement.created_at)
+    )
+    transit_rows = (await session.execute(stmt_transit)).all()
+
+    in_transit = [
+        InTransitItem(
+            movement_id=mv.id,
+            type=mv.type,
+            product_id=mv.product_id,
+            sku=sku,
+            product_name=product_name,
+            quantity=mv.quantity,
+            from_warehouse_name=from_warehouse_name,
+            to_warehouse_name=to_warehouse_name,
+            created_at=mv.created_at,
+        )
+        for mv, sku, product_name, from_warehouse_name, to_warehouse_name in transit_rows
+    ]
+
+    return StockReportResponse(items=items, in_transit=in_transit)
 
 
 async def transfer(session: AsyncSession, req: TransferRequest) -> MovementResponse:
