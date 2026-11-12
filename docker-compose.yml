@@ -25,6 +25,9 @@ services:
       - "8000:8000"
     volumes:
       - ./app:/app/app
+      - ./seed.py:/app/seed.py
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:
