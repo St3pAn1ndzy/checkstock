@@ -69,7 +69,7 @@ class TestIncome:
             quantity=3,
             idempotency_key="test-income-create-stock",
         )
-        mv = await income(session, req)
+        await income(session, req)
 
         stock = await session.scalar(
             select(Stock).where(

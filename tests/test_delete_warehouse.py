@@ -26,10 +26,14 @@ class TestDeleteWarehouse:
 
         # Stocks Севера не удалены
         sever_stocks = (
-            await session.execute(
-                select(Stock).where(Stock.warehouse_id == clean_db["sever_id"])
+            (
+                await session.execute(
+                    select(Stock).where(Stock.warehouse_id == clean_db["sever_id"])
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(sever_stocks) > 0
 
         # Всего stocks осталось 5

@@ -1,11 +1,15 @@
 """Тесты для отчёта остатков (get_stock_report)."""
 
-import pytest
 from sqlalchemy import select
 
-from app.enums import MovementStatus, MovementType
+from app.enums import MovementType
 from app.models import Stock
-from app.schemas import IncomeRequest, ReserveFbsRequest, ShipFboRequest, TransferRequest
+from app.schemas import (
+    IncomeRequest,
+    ReserveFbsRequest,
+    ShipFboRequest,
+    TransferRequest,
+)
 from app.services import (
     delete_warehouse,
     get_stock_report,
@@ -42,8 +46,10 @@ class TestStockReport:
 
         report = await get_stock_report(session)
         sever_101 = next(
-            i for i in report.items
-            if i.warehouse_id == clean_db["sever_id"] and i.product_id == clean_db["sku101_id"]
+            i
+            for i in report.items
+            if i.warehouse_id == clean_db["sever_id"]
+            and i.product_id == clean_db["sku101_id"]
         )
         assert sever_101.quantity == 15
         assert sever_101.available == 15
@@ -60,8 +66,10 @@ class TestStockReport:
 
         report = await get_stock_report(session)
         sever_101 = next(
-            i for i in report.items
-            if i.warehouse_id == clean_db["sever_id"] and i.product_id == clean_db["sku101_id"]
+            i
+            for i in report.items
+            if i.warehouse_id == clean_db["sever_id"]
+            and i.product_id == clean_db["sku101_id"]
         )
         assert sever_101.quantity == 10
         assert sever_101.reserved_fbs == 3
@@ -93,8 +101,10 @@ class TestStockReport:
 
         # Север.quantity уменьшился
         sever_101 = next(
-            i for i in report.items
-            if i.warehouse_id == clean_db["sever_id"] and i.product_id == clean_db["sku101_id"]
+            i
+            for i in report.items
+            if i.warehouse_id == clean_db["sever_id"]
+            and i.product_id == clean_db["sku101_id"]
         )
         assert sever_101.quantity == 7  # 10 - 3
 
@@ -118,8 +128,10 @@ class TestStockReport:
         assert transit.to_warehouse_name is None
 
         sever_101 = next(
-            i for i in report.items
-            if i.warehouse_id == clean_db["sever_id"] and i.product_id == clean_db["sku101_id"]
+            i
+            for i in report.items
+            if i.warehouse_id == clean_db["sever_id"]
+            and i.product_id == clean_db["sku101_id"]
         )
         assert sever_101.quantity == 6  # 10 - 4
 
@@ -135,8 +147,12 @@ class TestStockReport:
 
         # Но в БД stocks Севера остались
         sever_stocks = (
-            await session.execute(
-                select(Stock).where(Stock.warehouse_id == clean_db["sever_id"])
+            (
+                await session.execute(
+                    select(Stock).where(Stock.warehouse_id == clean_db["sever_id"])
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(sever_stocks) > 0

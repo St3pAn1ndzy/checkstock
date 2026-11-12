@@ -68,7 +68,9 @@ class TestReceive:
         )
         assert yug_stock.quantity == 9  # не 12
 
-    async def test_receive_fbo_ship_completes_without_stock_change(self, session, clean_db):
+    async def test_receive_fbo_ship_completes_without_stock_change(
+        self, session, clean_db
+    ):
         """Receive на FBO_SHIP: stocks не меняются, Movement COMPLETED, completed_at заполнен."""
         from app.schemas import ShipFboRequest
         from app.services import ship_fbo

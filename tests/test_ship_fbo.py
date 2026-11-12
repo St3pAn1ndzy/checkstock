@@ -1,7 +1,7 @@
 """Тесты для операции FBO-отгрузки (ship_fbo)."""
 
 import pytest
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 
 from app.enums import MovementStatus, MovementType
 from app.exceptions import InsufficientStockError
@@ -35,7 +35,7 @@ class TestShipFbo:
                 Stock.product_id == clean_db["sku101_id"],
             )
         )
-        assert stock.quantity == 6     # 10 - 4
+        assert stock.quantity == 6  # 10 - 4
         assert stock.reserved_fbs == 0  # не изменился
 
     async def test_ship_fbo_insufficient(self, session, clean_db):

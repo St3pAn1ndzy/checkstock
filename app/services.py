@@ -30,7 +30,6 @@ from app.schemas import (
     WarehouseRead,
 )
 
-
 # ── Helpers (приватные) ───────────────────────────────────────────
 
 
@@ -392,15 +391,17 @@ async def transfer(session: AsyncSession, req: TransferRequest) -> MovementRespo
 
     # Блокировка в порядке возрастания warehouse_id предотвращает deadlock
     # между transfer(A→B) и transfer(B→A).
+    # Блокируем обе строки в порядке возрастания warehouse_id (защита от deadlock).
+    # _to_stock нужен только для FOR UPDATE — модификация будет в receive().
     lo_id = min(req.from_warehouse_id, req.to_warehouse_id)
     hi_id = max(req.from_warehouse_id, req.to_warehouse_id)
     lo_stock = await _get_or_create_stock(session, lo_id, req.product_id)
     hi_stock = await _get_or_create_stock(session, hi_id, req.product_id)
 
     if req.from_warehouse_id == lo_id:
-        from_stock, to_stock = lo_stock, hi_stock
+        from_stock, _to_stock = lo_stock, hi_stock
     else:
-        from_stock, to_stock = hi_stock, lo_stock
+        from_stock, _to_stock = hi_stock, lo_stock
 
     available = from_stock.quantity - from_stock.reserved_fbs
     if available < req.quantity:

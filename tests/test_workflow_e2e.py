@@ -6,7 +6,12 @@ from sqlalchemy import func, select
 from app.enums import MovementStatus, MovementType
 from app.exceptions import InsufficientStockError, InvalidStatusError
 from app.models import Movement, Stock
-from app.schemas import IncomeRequest, ReserveFbsRequest, ShipFboRequest, TransferRequest
+from app.schemas import (
+    IncomeRequest,
+    ReserveFbsRequest,
+    ShipFboRequest,
+    TransferRequest,
+)
 from app.services import (
     cancel_fbs,
     delete_warehouse,
@@ -14,8 +19,8 @@ from app.services import (
     income,
     receive,
     reserve_fbs,
-    ship_fbs,
     ship_fbo,
+    ship_fbs,
     transfer,
 )
 
@@ -180,14 +185,18 @@ class TestWorkflowE2E:
 
         # 1. Income 5 на Север (SKU-101) → Север=15
         req_inc = IncomeRequest(
-            warehouse_id=sever, product_id=prod, quantity=5,
+            warehouse_id=sever,
+            product_id=prod,
+            quantity=5,
             idempotency_key="e2e-full-inc",
         )
         await income(session, req_inc)
 
         # 2. Reserve_fbs 3 → reserved=3
         req_res = ReserveFbsRequest(
-            warehouse_id=sever, product_id=prod, quantity=3,
+            warehouse_id=sever,
+            product_id=prod,
+            quantity=3,
             idempotency_key="e2e-full-res",
         )
         await reserve_fbs(session, req_res)
@@ -200,7 +209,10 @@ class TestWorkflowE2E:
 
         # 4. Transfer 2 Север→Юг → Север=10, Юг=6, PENDING TRANSFER qty=2
         req_trf = TransferRequest(
-            from_warehouse_id=sever, to_warehouse_id=yug, product_id=prod, quantity=2,
+            from_warehouse_id=sever,
+            to_warehouse_id=yug,
+            product_id=prod,
+            quantity=2,
             idempotency_key="e2e-full-trf",
         )
         mv_trf = await transfer(session, req_trf)
@@ -210,7 +222,9 @@ class TestWorkflowE2E:
 
         # 6. Ship_fbo 4 с Севера → Север=6, PENDING FBO_SHIP qty=4
         req_fbo = ShipFboRequest(
-            warehouse_id=sever, product_id=prod, quantity=4,
+            warehouse_id=sever,
+            product_id=prod,
+            quantity=4,
             idempotency_key="e2e-full-fbo",
         )
         mv_fbo = await ship_fbo(session, req_fbo)
@@ -245,17 +259,15 @@ class TestWorkflowE2E:
         #   FBS_SHIP/FBO_SHIP (списано): 3 + 4 = 7
         # Итого: 23 + 7 = 30 ✅
         all_stocks_qty = sum(
-            row[0] for row in (
-                await session.execute(select(Stock.quantity))
-            ).all()
+            row[0] for row in (await session.execute(select(Stock.quantity))).all()
         )
-        pending_qty = count = await session.scalar(
-            select(func.coalesce(func.sum(Movement.quantity), 0))
-            .where(Movement.status == MovementStatus.PENDING)
+        pending_qty = await session.scalar(
+            select(func.coalesce(func.sum(Movement.quantity), 0)).where(
+                Movement.status == MovementStatus.PENDING
+            )
         ) or 0
         shipped_qty = await session.scalar(
-            select(func.coalesce(func.sum(Movement.quantity), 0))
-            .where(
+            select(func.coalesce(func.sum(Movement.quantity), 0)).where(
                 Movement.type.in_([MovementType.FBS_SHIP, MovementType.FBO_SHIP]),
                 Movement.status == MovementStatus.COMPLETED,
             )
