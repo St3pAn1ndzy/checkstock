@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models import MovementStatus, MovementType
+from app.enums import MovementStatus, MovementType
 
 __all__ = [
     "ErrorResponse",
