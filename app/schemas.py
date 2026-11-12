@@ -21,6 +21,7 @@ __all__ = [
     "TransferRequest",
     "WarehouseCreate",
     "WarehouseRead",
+    "WarehouseUpdate",
 ]
 
 # ── Склады ────────────────────────────────────────────────────────
@@ -37,6 +38,10 @@ class WarehouseRead(BaseModel):
     name: str
     is_deleted: bool
     created_at: datetime
+
+
+class WarehouseUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
 
 
 # ── Товары ────────────────────────────────────────────────────────
