@@ -38,8 +38,12 @@ class Warehouse(Base):
     __tablename__ = "warehouses"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
-    is_deleted: Mapped[bool] = mapped_column(default=False, nullable=False, server_default=text("false"))
+    name: Mapped[str] = mapped_column(
+        String(100), unique=True, nullable=False, index=True
+    )
+    is_deleted: Mapped[bool] = mapped_column(
+        default=False, nullable=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -51,7 +55,9 @@ class Product(Base):
     __tablename__ = "products"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    sku: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+    sku: Mapped[str] = mapped_column(
+        String(50), unique=True, nullable=False, index=True
+    )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
 
     stocks: Mapped[list["Stock"]] = relationship(back_populates="product")
@@ -67,17 +73,25 @@ class Stock(Base):
     product_id: Mapped[int] = mapped_column(
         ForeignKey("products.id", ondelete="RESTRICT"), nullable=False
     )
-    quantity: Mapped[int] = mapped_column(default=0, nullable=False, server_default=text("0"))
-    reserved_fbs: Mapped[int] = mapped_column(default=0, nullable=False, server_default=text("0"))
+    quantity: Mapped[int] = mapped_column(
+        default=0, nullable=False, server_default=text("0")
+    )
+    reserved_fbs: Mapped[int] = mapped_column(
+        default=0, nullable=False, server_default=text("0")
+    )
 
     warehouse: Mapped["Warehouse"] = relationship(back_populates="stocks")
     product: Mapped["Product"] = relationship(back_populates="stocks")
 
     __table_args__ = (
-        UniqueConstraint("warehouse_id", "product_id", name="uq_stock_warehouse_product"),
+        UniqueConstraint(
+            "warehouse_id", "product_id", name="uq_stock_warehouse_product"
+        ),
         CheckConstraint("quantity >= 0", name="ck_stock_quantity_non_negative"),
         CheckConstraint("reserved_fbs >= 0", name="ck_stock_reserved_non_negative"),
-        CheckConstraint("reserved_fbs <= quantity", name="ck_stock_reserved_lte_quantity"),
+        CheckConstraint(
+            "reserved_fbs <= quantity", name="ck_stock_reserved_lte_quantity"
+        ),
     )
 
 
