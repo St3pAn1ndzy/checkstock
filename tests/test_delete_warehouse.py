@@ -3,10 +3,10 @@
 import pytest
 from sqlalchemy import select
 
-from app.exceptions import NotFoundError
+from app.exceptions import ConflictError, NotFoundError
 from app.models import Stock, Warehouse
-from app.schemas import IncomeRequest
-from app.services import delete_warehouse, income
+from app.schemas import IncomeRequest, ReserveFbsRequest
+from app.services import cancel_fbs, delete_warehouse, income, reserve_fbs, ship_fbs
 
 
 class TestDeleteWarehouse:
@@ -79,3 +79,51 @@ class TestDeleteWarehouse:
         # Склад помечен
         wh = await session.get(Warehouse, clean_db["sever_id"])
         assert wh.is_deleted is True
+
+    async def test_delete_warehouse_with_active_reserve_raises(self, session, clean_db):
+        """reserve_fbs 3 → delete Север → ConflictError."""
+        # Arrange
+        req = ReserveFbsRequest(
+            warehouse_id=clean_db["sever_id"],
+            product_id=clean_db["sku101_id"],
+            quantity=3,
+            idempotency_key="b4-reserve",
+        )
+        await reserve_fbs(session, req)
+
+        # Act / Assert
+        with pytest.raises(ConflictError) as exc:
+            await delete_warehouse(session, clean_db["sever_id"])
+        assert "резерве" in str(exc.value.message)
+
+        # Склад не удалён
+        wh = await session.get(Warehouse, clean_db["sever_id"])
+        assert wh.is_deleted is False
+
+    async def test_delete_warehouse_after_cancel_reserve_ok(self, session, clean_db):
+        """reserve_fbs 3 → cancel_fbs → delete Север → 200."""
+        req = ReserveFbsRequest(
+            warehouse_id=clean_db["sever_id"],
+            product_id=clean_db["sku101_id"],
+            quantity=3,
+            idempotency_key="b4-cancel",
+        )
+        mv = await reserve_fbs(session, req)
+        await cancel_fbs(session, mv.id)
+
+        result = await delete_warehouse(session, clean_db["sever_id"])
+        assert result.is_deleted is True
+
+    async def test_delete_warehouse_after_ship_reserve_ok(self, session, clean_db):
+        """reserve_fbs 3 → ship_fbs → delete Север → 200."""
+        req = ReserveFbsRequest(
+            warehouse_id=clean_db["sever_id"],
+            product_id=clean_db["sku101_id"],
+            quantity=3,
+            idempotency_key="b4-ship",
+        )
+        mv = await reserve_fbs(session, req)
+        await ship_fbs(session, mv.id)
+
+        result = await delete_warehouse(session, clean_db["sever_id"])
+        assert result.is_deleted is True
