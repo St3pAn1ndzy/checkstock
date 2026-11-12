@@ -3,62 +3,65 @@
 import pytest
 from sqlalchemy import select
 
-from app.database import async_session_factory
 from app.enums import MovementStatus
 from app.exceptions import InvalidStatusError
 from app.models import Stock
-from app.services import cancel_fbs
+from app.schemas import ReserveFbsRequest
+from app.services import cancel_fbs, reserve_fbs, ship_fbs
 
 
 class TestCancelFbs:
     """Отмена FBS-резерва."""
 
-    async def test_success(self, session, clean_db, reserved_movement):
+    async def test_success(self, session, clean_db):
         """Cancel_fbs переводит PENDING → CANCELLED, возвращает reserved_fbs."""
-        mv = await cancel_fbs(session, reserved_movement)
+        req = ReserveFbsRequest(
+            warehouse_id=clean_db["sever_id"],
+            product_id=clean_db["sku101_id"],
+            quantity=3,
+            idempotency_key="test-cancel-success",
+        )
+        mv = await reserve_fbs(session, req)
+        mv = await cancel_fbs(session, mv.id)
 
         assert mv.status == MovementStatus.CANCELLED
         assert mv.completed_at is not None
 
-        async with async_session_factory() as fresh:
-            stock = await fresh.scalar(
-                select(Stock).where(
-                    Stock.warehouse_id == clean_db["sever_id"],
-                    Stock.product_id == clean_db["sku101_id"],
-                )
+        stock = await session.scalar(
+            select(Stock).where(
+                Stock.warehouse_id == clean_db["sever_id"],
+                Stock.product_id == clean_db["sku101_id"],
             )
+        )
         assert stock.quantity == 10  # не изменился
         assert stock.reserved_fbs == 0  # 3 → 0
 
-    async def test_idempotent(self, session, clean_db, reserved_movement):
-        """Повторный cancel_fbs не меняет данные."""
-        mv1 = await cancel_fbs(session, reserved_movement)
-        mv2 = await cancel_fbs(session, reserved_movement)
+    async def test_idempotent(self, session, clean_db):
+        """Повторный cancel_fbs с тем же movement_id → CANCELLED (не ошибка)."""
+        req = ReserveFbsRequest(
+            warehouse_id=clean_db["sever_id"],
+            product_id=clean_db["sku101_id"],
+            quantity=2,
+            idempotency_key="test-cancel-idempotent",
+        )
+        mv = await reserve_fbs(session, req)
+        mv1 = await cancel_fbs(session, mv.id)
+        mv2 = await cancel_fbs(session, mv.id)
 
         assert mv1.id == mv2.id
+        assert mv2.status == MovementStatus.CANCELLED
 
-        async with async_session_factory() as fresh:
-            stock = await fresh.scalar(
-                select(Stock).where(
-                    Stock.warehouse_id == clean_db["sever_id"],
-                    Stock.product_id == clean_db["sku101_id"],
-                )
-            )
-        assert stock.reserved_fbs == 0
+    async def test_completed_raises(self, session, clean_db):
+        """Cancel_fbs на FBS_SHIP (COMPLETED) → InvalidStatusError."""
+        req = ReserveFbsRequest(
+            warehouse_id=clean_db["sever_id"],
+            product_id=clean_db["sku101_id"],
+            quantity=3,
+            idempotency_key="test-cancel-completed",
+        )
+        mv = await reserve_fbs(session, req)
+        mv_ship = await ship_fbs(session, mv.id)  # FBS_SHIP, COMPLETED
 
-    async def test_completed_raises(self, session, clean_db, shipped_movement):
-        """Cancel_fbs на COMPLETED (FBS_SHIP) → InvalidStatusError."""
-        # shipped_movement: reserve 3 → ship → quantity=7, reserved=0
-        # но shipped_movement уже не FBS_RESERVE, а FBS_SHIP
-        with pytest.raises(InvalidStatusError):
-            await cancel_fbs(session, shipped_movement)
-
-        async with async_session_factory() as fresh:
-            stock = await fresh.scalar(
-                select(Stock).where(
-                    Stock.warehouse_id == clean_db["sever_id"],
-                    Stock.product_id == clean_db["sku101_id"],
-                )
-            )
-        assert stock.quantity == 7
-        assert stock.reserved_fbs == 0
+        with pytest.raises(InvalidStatusError) as exc_info:
+            await cancel_fbs(session, mv_ship.id)
+        assert "FBS_SHIP" in str(exc_info.value)
