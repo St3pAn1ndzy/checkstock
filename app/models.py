@@ -1,5 +1,4 @@
 from datetime import datetime
-from enum import Enum
 
 from sqlalchemy import (
     CheckConstraint,
@@ -16,22 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
-
-
-class MovementType(str, Enum):
-    INCOME = "INCOME"
-    TRANSFER = "TRANSFER"
-    FBS_RESERVE = "FBS_RESERVE"
-    FBS_CANCEL = "FBS_CANCEL"
-    FBS_SHIP = "FBS_SHIP"
-    FBO_SHIP = "FBO_SHIP"
-    RECEIVE = "RECEIVE"
-
-
-class MovementStatus(str, Enum):
-    PENDING = "PENDING"
-    COMPLETED = "COMPLETED"
-    CANCELLED = "CANCELLED"
+from app.enums import MovementStatus, MovementType
 
 
 class Warehouse(Base):
