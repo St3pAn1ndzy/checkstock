@@ -457,7 +457,6 @@ async def get_stock_report(session: AsyncSession) -> StockReportResponse:
     )
     transit_rows = (await session.execute(stmt_transit)).all()
 
-
     def _direction(mv_type: MovementType) -> str:
         if mv_type == MovementType.TRANSFER:
             return "between_warehouses"
@@ -466,7 +465,6 @@ async def get_stock_report(session: AsyncSession) -> StockReportResponse:
         if mv_type == MovementType.FBS_SHIP:
             return "to_customer"
         raise ValueError(f"unexpected type in transit: {mv_type}")
-
 
     from app.schemas import InTransitItem
 
