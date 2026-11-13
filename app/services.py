@@ -6,7 +6,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -21,7 +21,6 @@ from app.exceptions import (
 from app.models import Movement, Product, Stock, Warehouse
 from app.schemas import (
     IncomeRequest,
-    InTransitItem,
     MovementResponse,
     MovementsListResponse,
     ProductCreate,
@@ -425,7 +424,10 @@ async def get_stock_report(session: AsyncSession) -> StockReportResponse:
         for stock, warehouse_name, sku, product_name in rows
     ]
 
-    # In-transit: PENDING movements TRANSFER / FBO_SHIP
+    # In-transit:
+    #   TRANSFER PENDING — между ФФ
+    #   FBO_SHIP PENDING — на склад маркетплейса
+    #   FBS_SHIP COMPLETED — к клиенту (нет отметки «доставлено», висит навсегда)
     WarehouseFrom = aliased(Warehouse, name="from_wh")
     WarehouseTo = aliased(Warehouse, name="to_wh")
     stmt_transit = (
@@ -440,17 +442,39 @@ async def get_stock_report(session: AsyncSession) -> StockReportResponse:
         .outerjoin(WarehouseFrom, Movement.from_warehouse_id == WarehouseFrom.id)
         .outerjoin(WarehouseTo, Movement.to_warehouse_id == WarehouseTo.id)
         .where(
-            Movement.status == MovementStatus.PENDING,
-            Movement.type.in_([MovementType.TRANSFER, MovementType.FBO_SHIP]),
+            or_(
+                and_(
+                    Movement.status == MovementStatus.PENDING,
+                    Movement.type.in_([MovementType.TRANSFER, MovementType.FBO_SHIP]),
+                ),
+                and_(
+                    Movement.status == MovementStatus.COMPLETED,
+                    Movement.type == MovementType.FBS_SHIP,
+                ),
+            )
         )
         .order_by(Movement.created_at)
     )
     transit_rows = (await session.execute(stmt_transit)).all()
 
+
+    def _direction(mv_type: MovementType) -> str:
+        if mv_type == MovementType.TRANSFER:
+            return "between_warehouses"
+        if mv_type == MovementType.FBO_SHIP:
+            return "to_marketplace"
+        if mv_type == MovementType.FBS_SHIP:
+            return "to_customer"
+        raise ValueError(f"unexpected type in transit: {mv_type}")
+
+
+    from app.schemas import InTransitItem
+
     in_transit = [
         InTransitItem(
             movement_id=mv.id,
             type=mv.type,
+            direction=_direction(mv.type),
             product_id=mv.product_id,
             sku=sku,
             product_name=product_name,
