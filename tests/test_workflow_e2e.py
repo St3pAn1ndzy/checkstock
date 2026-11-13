@@ -1,7 +1,7 @@
 """Сквозной E2E-тест — полный цикл операций."""
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 
 from app.enums import MovementStatus, MovementType
 from app.exceptions import InsufficientStockError, InvalidStatusError
@@ -247,24 +247,38 @@ class TestWorkflowE2E:
         yug_103 = next(i for i in report.items if i.sku == "SKU-103")
         assert yug_103.quantity == 4
 
-        # in_transit пустой
-        assert len(report.in_transit) == 0
+        # in_transit: FBS_SHIP COMPLETED (к клиенту) — 1 элемент
+        assert len(report.in_transit) == 1
+        transit = report.in_transit[0]
+        assert transit.type == MovementType.FBS_SHIP
+        assert transit.direction == "to_customer"
+        assert transit.quantity == 3
+        assert transit.from_warehouse_name == "Север"
 
         # 10. Проверка сходимости:
-        # Исходные stocks: 10+6+5+0+4 = 25
-        # Income +5 → 30 — это «весь товар в системе»
-        # После всех операций:
+        # stocks + in_transit + shipped = 30
         #   stocks (все, включая удалённые): Север=6+5+0, Юг=8+0+4 = 23
-        #   PENDING movements: 0 (все закрыты)
-        #   FBS_SHIP/FBO_SHIP (списано): 3 + 4 = 7
-        # Итого: 23 + 7 = 30 ✅
+        #   in_transit: FBS_SHIP COMPLETED qty=3
+        #   shipped: FBO_SHIP COMPLETED qty=4
+        # Итого: 23 + 3 + 4 = 30 ✅
         all_stocks_qty = sum(
             row[0] for row in (await session.execute(select(Stock.quantity))).all()
         )
-        pending_qty = (
+        in_transit_qty = (
             await session.scalar(
                 select(func.coalesce(func.sum(Movement.quantity), 0)).where(
-                    Movement.status == MovementStatus.PENDING
+                    or_(
+                        and_(
+                            Movement.status == MovementStatus.PENDING,
+                            Movement.type.in_(
+                                [MovementType.TRANSFER, MovementType.FBO_SHIP]
+                            ),
+                        ),
+                        and_(
+                            Movement.status == MovementStatus.COMPLETED,
+                            Movement.type == MovementType.FBS_SHIP,
+                        ),
+                    )
                 )
             )
             or 0
@@ -272,10 +286,10 @@ class TestWorkflowE2E:
         shipped_qty = (
             await session.scalar(
                 select(func.coalesce(func.sum(Movement.quantity), 0)).where(
-                    Movement.type.in_([MovementType.FBS_SHIP, MovementType.FBO_SHIP]),
+                    Movement.type == MovementType.FBO_SHIP,
                     Movement.status == MovementStatus.COMPLETED,
                 )
             )
             or 0
         )
-        assert all_stocks_qty + pending_qty + shipped_qty == 30
+        assert all_stocks_qty + in_transit_qty + shipped_qty == 30
