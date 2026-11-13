@@ -1,6 +1,7 @@
 """Pydantic-схемы запросов и ответов для всех эндпоинтов."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -77,6 +78,7 @@ class StockItem(BaseModel):
 class InTransitItem(BaseModel):
     movement_id: int
     type: MovementType
+    direction: Literal["between_warehouses", "to_marketplace", "to_customer"]
     product_id: int
     sku: str
     product_name: str
